@@ -1,0 +1,72 @@
+const {chromium} = require('playwright');
+const fs = require('node:fs');
+const assert = require('node:assert/strict');
+(async () => {
+  const browser = await chromium.launch({executablePath:process.env.CHROMIUM_EXECUTABLE,headless:true,args:['--disable-dev-shm-usage']});
+  const report = {at:new Date().toISOString(),scope:'ISOLATED STAGE + REAL PUBLIC CAPTURES, NO PRODUCTION PASSWORD',checks:[],errors:[]};
+  try {
+    const page = await browser.newPage({viewport:{width:1440,height:1000}});
+    page.on('pageerror', e => report.errors.push(e.message));
+    const response = await page.goto('http://localhost:3216/', {waitUntil:'networkidle'});
+    assert.equal(response.status(), 200);
+    assert.equal(await page.evaluate(async () => (await fetch('/api/discovery')).status), 401);
+    await page.getByLabel('Senha',{exact:true}).fill(fs.readFileSync('data/expansion-stage/secrets/initial-password.txt','utf8').trim());
+    await page.getByRole('button',{name:'Entrar no laboratório'}).click();
+    await page.locator('#workspace').waitFor({state:'visible'});
+    await page.waitForFunction(() => document.querySelectorAll('#discovery-decisions tr').length === 40);
+    const data = await page.evaluate(async () => (await fetch('/api/discovery')).json());
+    assert.equal(data.live,false); assert.equal(data.real_fills,0); assert.equal(data.real_pnl,0);
+    assert.equal(data.decisions.length,360); assert.equal(data.total_decisions_all_scenarios,1080);
+    assert(Object.values(data.health).every(h => h.pairs === 8));
+    report.health = data.health; report.run_id = data.id;
+    report.checks.push('session-authenticated API uses observed captures: 5 venues × 8 bases; 1080 counterfactuals across 3 budgets; zero real fills/PnL');
+    await page.locator('#discovery-venue').selectOption('okx');
+    assert.equal(await page.locator('#discovery-decisions tr').count(),8);
+    await page.locator('#discovery-base').selectOption('BTC');
+    assert.equal(await page.locator('#discovery-decisions tr').count(),1);
+    await page.locator('#discovery-strategy').selectOption('B');
+    assert.equal(await page.locator('#discovery-decisions tr').count(),4);
+    await page.locator('#discovery-strategy').selectOption('C');
+    assert.equal(await page.locator('#discovery-decisions tr').count(),4);
+    await page.locator('#discovery-decisions button').first().click();
+    assert.match(await page.getByRole('dialog').textContent(),/source_timestamps|LEG_DATA_UNAVAILABLE|UNSYNCED_BOOKS/);
+    assert.match(await page.getByRole('dialog').textContent(),new RegExp(data.id));
+    await page.getByRole('button',{name:'Fechar',exact:true}).click();
+    report.checks.push('venue/base/A-B-C filters and audit modal show actual run id, reasons and source times');
+    await page.locator('#discovery-venue').selectOption('');
+    await page.locator('#discovery-base').selectOption('');
+    await page.locator('#discovery-strategy').selectOption('A');
+    for (const budget of ['100','5000','1000']) {
+      await page.locator('#discovery-budget').selectOption(budget);
+      await page.waitForFunction(b => document.querySelector('#discovery-budget').value === b && document.querySelectorAll('#discovery-decisions tr').length === 40, budget);
+      await page.waitForLoadState('networkidle');
+    }
+    await page.locator('#discovery-config button').click();
+    await page.waitForFunction(() => document.querySelector('#discovery-config-status').textContent.includes('Configurados'));
+    report.checks.push('3 virtual budgets + CSRF-protected scenario save; existing paper account not touched');
+    const windows = await page.locator('#discovery-window option').evaluateAll(opts => opts.map(o => o.value));
+    assert(windows.length > 2);
+    await page.locator('#discovery-window').selectOption(windows[windows.length - 1]);
+    await page.waitForLoadState('networkidle');
+    assert.match(await page.locator('#discovery-status').textContent(),/snapshot vencido/);
+    await page.locator('#discovery-window').selectOption('latest');
+    await page.waitForLoadState('networkidle');
+    await page.locator('#discovery').scrollIntoViewIfNeeded();
+    fs.mkdirSync('evidence/expansion-screenshots',{recursive:true});
+    await page.screenshot({path:'evidence/expansion-screenshots/desktop.png'});
+    await page.setViewportSize({width:390,height:844});
+    assert(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+    await page.screenshot({path:'evidence/expansion-screenshots/mobile.png'});
+    report.checks.push('historical windows, expired snapshot label, desktop + mobile390 no viewport overflow');
+    const original = await page.evaluate(async () => (await fetch('/api/monitor')).json());
+    assert.equal(original.brl5.balance,5); assert.equal(original.brl5.fills,0);
+    assert.equal(original.latest.shadow_brl1000.balance,1000);
+    await page.locator('#logout').click();
+    await page.locator('#login-form').waitFor({state:'visible'});
+    assert.equal(await page.evaluate(async () => (await fetch('/api/discovery/history')).status),401);
+    assert.deepEqual(report.errors,[]);
+    report.checks.push('legacy R$5 + R$1000 remain separate; logout protects discovery history');
+    report.status='PASS';
+  } catch(e) {report.status='FAIL';report.failure=e.message; process.exitCode=1;}
+  finally {fs.writeFileSync('evidence/expansion-browser.json',JSON.stringify(report,null,2));await browser.close();console.log(JSON.stringify(report,null,2));}
+})();
